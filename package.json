@@ -11,10 +11,13 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.18",
+    "esbuild": "^0.25.0",
+    "qrcode": "^1.5.4",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.4.5"
   },
   "scripts": {
+    "vendor:qrcode": "esbuild node_modules/qrcode/lib/browser.js --bundle --platform=browser --format=iife --global-name=QRCode --outfile=resource/vendor/qrcode.min.js",
     "build:css": "npx @tailwindcss/cli -i ./tailwind-basecoat.css -o ./resource/app/compiled.css",
     "build": "npm run build:css && npx tsc",
     "watch": "npx tsc --watch --preserveWatchOutput",

@@ -212,6 +212,10 @@ class ShortenerPage extends qx.ui.container.Composite {
   private __shortenBtn: BsButton;
   private __themeBtn: BsButton;
   private __lastShortUrl = "";
+  private __lastQrDataUrl = "";
+  private __qrHost: qx.ui.embed.Html;
+  private __qrPopup: qx.ui.popup.Popup;
+  private __qrPopupImg: qx.ui.embed.Html;
   private __recentBody: qx.ui.container.Composite;
 
   constructor() {
@@ -295,6 +299,15 @@ class ShortenerPage extends qx.ui.container.Composite {
     this.__shortUrlLabel.setSelectable(true);
     this.__shortUrlLabel.setWrap(true);
 
+    this.__qrHost = new qx.ui.embed.Html(this.__mainQrPlaceholderHtml());
+    this.__qrHost.setMinWidth(168);
+    this.__qrHost.setWidth(168);
+    this.__qrHost.setMinHeight(168);
+    this.__qrHost.setHeight(168);
+    this.__qrHost.setAllowShrinkX(false);
+    this.__qrHost.setAllowShrinkY(false);
+    this.__qrHost.exclude();
+
     const copyRow = new qx.ui.container.Composite(
       new qx.ui.layout.HBox(8).set({ alignY: "middle" }),
     );
@@ -307,16 +320,32 @@ class ShortenerPage extends qx.ui.container.Composite {
     openBtn.setAllowGrowX(true);
     openBtn.setMinHeight(44);
     openBtn.onClick(() => this.__openShortUrl());
+    const saveQrBtn = new BsButton("Save QR", undefined, { variant: "outline" });
+    saveQrBtn.setAllowGrowX(true);
+    saveQrBtn.setMinHeight(44);
+    saveQrBtn.onClick(() => this.__saveQrPng());
     copyRow.add(copyBtn, { flex: 1 });
     copyRow.add(openBtn, { flex: 1 });
+    copyRow.add(saveQrBtn, { flex: 1 });
 
     inner.add(heading);
     inner.add(hint);
     inner.add(this.__longUrl);
     inner.add(this.__customSlug);
     inner.add(this.__shortenBtn);
-    inner.add(outHeading);
-    inner.add(this.__shortUrlLabel);
+    const outRow = new qx.ui.container.Composite(
+      new qx.ui.layout.HBox(10).set({ alignY: "top" }),
+    );
+    outRow.setAllowGrowX(true);
+    const urlCol = new qx.ui.container.Composite(
+      new qx.ui.layout.VBox(6).set({ alignX: "stretch" }),
+    );
+    urlCol.setAllowGrowX(true);
+    urlCol.add(outHeading);
+    urlCol.add(this.__shortUrlLabel);
+    outRow.add(urlCol, { flex: 1 });
+    outRow.add(this.__qrHost);
+    inner.add(outRow);
     inner.add(copyRow);
 
     card.setContent(inner);
@@ -370,7 +399,129 @@ class ShortenerPage extends qx.ui.container.Composite {
     qx.event.Registration.addListener(window, "resize", syncWidths);
     syncWidths();
 
+    const popupLayout = new qx.ui.layout.VBox(12).set({ alignX: "center" });
+    this.__qrPopup = new qx.ui.popup.Popup(popupLayout);
+    this.__qrPopup.setPadding(16);
+    this.__qrPopup.setAutoHide(true);
+    this.__qrPopup.setBackgroundColor(AppColors.card());
+    const qrPopupTitle = new qx.ui.basic.Label("QR code");
+    qrPopupTitle.setTextColor(AppColors.foreground());
+    qrPopupTitle.setFont(
+      // @ts-ignore qooxdoo Font
+      new qx.bom.Font(16).set({ bold: true }),
+    );
+    this.__qrPopupImg = new qx.ui.embed.Html(
+      `<p class="text-center text-sm" style="color:var(--color-muted-foreground)">Loading…</p>`,
+    );
+    const qrPopupClose = new BsButton("Close", undefined, { variant: "outline" });
+    qrPopupClose.onClick(() => this.__qrPopup.hide());
+    this.__qrPopup.add(qrPopupTitle);
+    this.__qrPopup.add(this.__qrPopupImg);
+    this.__qrPopup.add(qrPopupClose);
+
     this.__renderRecent();
+  }
+
+  private __mainQrPlaceholderHtml(): string {
+    return `<div class="flex items-center justify-center rounded-lg border bg-white" style="width:100%;height:100%"><p class="text-center text-xs px-2" style="color: var(--color-muted-foreground)">Generate link</p></div>`;
+  }
+
+  private __refreshMainQr(shortUrl: string): void {
+    generateQrDataUrl(shortUrl, 160).then(
+      (dataUrl) => {
+        this.__lastQrDataUrl = dataUrl;
+        this.__qrHost.show();
+        this.__qrHost.setHtml(
+          `<div class="flex justify-center rounded-lg bg-white p-1" style="width:100%;height:100%"><img src="${dataUrl}" width="160" height="160" alt="QR code for shortened link" /></div>`,
+        );
+      },
+      () => {
+        this.__lastQrDataUrl = "";
+        this.__qrHost.setHtml(this.__mainQrPlaceholderHtml());
+        this.__qrHost.exclude();
+        BsToast.error(
+          "QR unavailable",
+          "Could not generate QR code. Ensure resource/vendor/qrcode.min.js is loaded.",
+        );
+      },
+    );
+  }
+
+  private __clearMainQr(): void {
+    this.__lastQrDataUrl = "";
+    this.__qrHost.setHtml(this.__mainQrPlaceholderHtml());
+    this.__qrHost.exclude();
+  }
+
+  private __saveQrPng(): void {
+    if (!this.__lastQrDataUrl) {
+      BsToast.warning("Nothing to save", "Shorten a link first.");
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = this.__lastQrDataUrl;
+    a.download = "short-link.png";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    BsToast.success("Saved", "short-link.png");
+  }
+
+  private __showRecentQrPopup(shortUrl: string): void {
+    this.__qrPopupImg.setHtml(
+      `<p class="text-center text-sm" style="color:var(--color-muted-foreground)">Loading…</p>`,
+    );
+    generateQrDataUrl(shortUrl, 280).then(
+      (dataUrl) => {
+        this.__qrPopupImg.setHtml(
+          `<div class="flex justify-center rounded-lg bg-white p-2"><img src="${dataUrl}" width="280" height="280" alt="QR code for shortened link" /></div>`,
+        );
+        this.__qrPopup.show();
+        qx.event.Timer.once(() => this.__centerQrPopup(), this, 50);
+      },
+      () => {
+        BsToast.error(
+          "QR unavailable",
+          "Could not generate QR code. Ensure resource/vendor/qrcode.min.js is loaded.",
+        );
+      },
+    );
+  }
+
+  private __centerQrPopup(): void {
+    const vw = qx.bom.Viewport.getWidth();
+    const vh = qx.bom.Viewport.getHeight();
+    const b = this.__qrPopup.getBounds();
+    if (!b) return;
+    const left = Math.max(12, Math.floor((vw - b.width) / 2));
+    const top = Math.max(12, Math.floor((vh - b.height) / 2));
+    this.__qrPopup.moveTo(left, top);
+  }
+
+  private __historyQrHtml(shortUrl: string): qx.ui.embed.Html {
+    const host = new qx.ui.embed.Html(
+      `<div class="rounded-md border bg-white" style="width:100%;height:100%"></div>`,
+    );
+    host.setMinWidth(72);
+    host.setWidth(72);
+    host.setMinHeight(72);
+    host.setHeight(72);
+    host.setAllowShrinkX(false);
+    host.setAllowShrinkY(false);
+    generateQrDataUrl(shortUrl, 68).then(
+      (dataUrl) => {
+        host.setHtml(
+          `<div class="rounded-md border bg-white p-0.5" style="width:100%;height:100%"><img src="${dataUrl}" width="68" height="68" alt="QR code for history link" /></div>`,
+        );
+      },
+      () => {
+        host.setHtml(
+          `<div class="rounded-md border bg-white flex items-center justify-center" style="width:100%;height:100%"><span class="text-[10px]" style="color:var(--color-muted-foreground)">QR</span></div>`,
+        );
+      },
+    );
+    return host;
   }
 
   private __themeButtonLabel(): string {
@@ -449,6 +600,7 @@ class ShortenerPage extends qx.ui.container.Composite {
     const shortUrl = buildLocalGoShortUrl(slug);
     this.__lastShortUrl = shortUrl;
     this.__shortUrlLabel.setValue(shortUrl);
+    this.__refreshMainQr(shortUrl);
     BsToast.success("Link saved", "Open the short URL in this browser to redirect.");
   }
 
@@ -482,6 +634,7 @@ class ShortenerPage extends qx.ui.container.Composite {
         LinkStore.put(data.slug, target, shortUrl);
         this.__lastShortUrl = shortUrl;
         this.__shortUrlLabel.setValue(shortUrl);
+        this.__refreshMainQr(shortUrl);
         BsToast.success("Link saved", shortUrl);
         this.__renderRecent();
       })
@@ -523,6 +676,7 @@ class ShortenerPage extends qx.ui.container.Composite {
     this.__renderRecent();
     this.__lastShortUrl = "";
     this.__shortUrlLabel.setValue("—");
+    this.__clearMainQr();
     BsToast.info("Cleared", "All saved short links were removed from this browser.");
   }
 
@@ -553,6 +707,12 @@ class ShortenerPage extends qx.ui.container.Composite {
       );
       line1.setWrap(true);
       line1.setTextColor(AppColors.foreground());
+      const headRow = new qx.ui.container.Composite(
+        new qx.ui.layout.HBox(8).set({ alignY: "middle" }),
+      );
+      headRow.setAllowGrowX(true);
+      headRow.add(line1, { flex: 1 });
+      headRow.add(this.__historyQrHtml(shortUrl));
       const btnRow = new qx.ui.container.Composite(
         new qx.ui.layout.HBox(6).set({ alignY: "middle" }),
       );
@@ -564,14 +724,18 @@ class ShortenerPage extends qx.ui.container.Composite {
         if (this.__lastShortUrl === shortUrl) {
           this.__lastShortUrl = "";
           this.__shortUrlLabel.setValue("—");
+          this.__clearMainQr();
         }
         this.__renderRecent();
         BsToast.info("Removed", slug);
       });
+      const qrBtn = new BsButton("QR", undefined, { variant: "outline", size: "sm" });
+      qrBtn.onClick(() => this.__showRecentQrPopup(shortUrl));
       btnRow.add(copyShort);
+      btnRow.add(qrBtn);
       btnRow.add(delBtn);
       btnRow.add(new qx.ui.core.Spacer(), { flex: 1 });
-      row.add(line1);
+      row.add(headRow);
       row.add(btnRow);
       this.__recentBody.add(row);
     }

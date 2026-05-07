@@ -3,6 +3,8 @@ type LinkEntry = {
   createdAt: number;
   /** When set (e.g. API shorten), copy/share uses this instead of local ?go= URL */
   shortUrl?: string;
+  /** True when the user chose a custom slug (new saves only; omit/false for legacy data). */
+  customSlug?: boolean;
 };
 
 const STORAGE_KEY = "link-shortener-v1";
@@ -37,13 +39,18 @@ class LinkStore {
     return slug in this.load();
   }
 
-  static put(slug: string, targetUrl: string, shortUrl?: string): void {
+  static put(
+    slug: string,
+    targetUrl: string,
+    meta?: { shortUrl?: string; customSlug?: boolean },
+  ): void {
     const map = this.load();
     const next: LinkEntry = {
       targetUrl,
       createdAt: Date.now(),
     };
-    if (shortUrl !== undefined) next.shortUrl = shortUrl;
+    if (meta?.shortUrl !== undefined) next.shortUrl = meta.shortUrl;
+    if (meta?.customSlug === true) next.customSlug = true;
     map[slug] = next;
     this.save(map);
   }
@@ -60,6 +67,11 @@ class LinkStore {
   }
 
   static listRecent(limit: number): { slug: string; entry: LinkEntry }[] {
+    return this.listAllSorted().slice(0, limit);
+  }
+
+  /** All links newest-first (for search/filter across full history). */
+  static listAllSorted(): { slug: string; entry: LinkEntry }[] {
     const map = this.load();
     const keys = Object.keys(map);
     const rows: { slug: string; entry: LinkEntry }[] = [];
@@ -67,7 +79,7 @@ class LinkStore {
       const slug = keys[i];
       rows.push({ slug, entry: map[slug] });
     }
-    return rows.sort((a, b) => b.entry.createdAt - a.entry.createdAt).slice(0, limit);
+    return rows.sort((a, b) => b.entry.createdAt - a.entry.createdAt);
   }
 }
 
@@ -217,6 +229,12 @@ class ShortenerPage extends qx.ui.container.Composite {
   private __qrPopup: qx.ui.popup.Popup;
   private __qrPopupImg: qx.ui.embed.Html;
   private __recentBody: qx.ui.container.Composite;
+  private __recentFilterInput: BsInput;
+  private __recentFilterAllBtn: BsButton;
+  private __recentFilterCustomBtn: BsButton;
+  private __recentFilterQuery = "";
+  private __recentOnlyCustom = false;
+  private __recentRelIntervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     super();
@@ -281,14 +299,20 @@ class ShortenerPage extends qx.ui.container.Composite {
 
     this.__longUrl = new BsInput("", "https://example.com/very/long/path", "w-full");
     this.__customSlug = new BsInput("", "Optional custom code (letters, numbers, dash)", "w-full");
+    this.__longUrl.setHelperText("Paste an http(s) URL.");
+    this.__customSlug.setHelperText("Leave blank for a random code.");
 
     bindInputEnter(this.__longUrl, () => this.__shorten());
     bindInputEnter(this.__customSlug, () => this.__shorten());
+
+    this.__longUrl.onInput(() => this.__updateFormValidation());
+    this.__customSlug.onInput(() => this.__updateFormValidation());
 
     this.__shortenBtn = new BsButton("Shorten", undefined, { variant: "default" });
     this.__shortenBtn.setAllowGrowX(true);
     this.__shortenBtn.setMinHeight(44);
     this.__shortenBtn.onClick(() => this.__shorten());
+    this.__updateFormValidation();
 
     const outHeading = new qx.ui.basic.Label("Your short URL");
     outHeading.setTextColor(AppColors.mutedForeground());
@@ -302,10 +326,14 @@ class ShortenerPage extends qx.ui.container.Composite {
     this.__qrHost = new qx.ui.embed.Html(this.__mainQrPlaceholderHtml());
     this.__qrHost.setMinWidth(168);
     this.__qrHost.setWidth(168);
+    this.__qrHost.setMaxWidth(168);
     this.__qrHost.setMinHeight(168);
     this.__qrHost.setHeight(168);
+    this.__qrHost.setMaxHeight(168);
     this.__qrHost.setAllowShrinkX(false);
     this.__qrHost.setAllowShrinkY(false);
+    this.__qrHost.setAllowGrowX(false);
+    this.__qrHost.setAllowGrowY(false);
     this.__qrHost.exclude();
 
     const copyRow = new qx.ui.container.Composite(
@@ -371,10 +399,45 @@ class ShortenerPage extends qx.ui.container.Composite {
     );
     recentHeader.add(recentTitle, { flex: 1 });
     recentHeader.add(clearRecentBtn);
+
+    this.__recentFilterInput = new BsInput("", "Filter by slug or URL…", "w-full");
+    this.__recentFilterInput.onInput(() => {
+      this.__recentFilterQuery = this.__recentFilterInput.getValue();
+      this.__renderRecent();
+    });
+
+    const filterSeg = new qx.ui.container.Composite(
+      new qx.ui.layout.HBox(8).set({ alignY: "middle" }),
+    );
+    filterSeg.setAllowGrowX(true);
+    this.__recentFilterAllBtn = new BsButton("All", undefined, {
+      variant: "outline",
+      size: "sm",
+    });
+    this.__recentFilterCustomBtn = new BsButton("Custom only", undefined, {
+      variant: "ghost",
+      size: "sm",
+    });
+    this.__recentFilterAllBtn.onClick(() => {
+      this.__recentOnlyCustom = false;
+      this.__syncRecentFilterButtons();
+      this.__renderRecent();
+    });
+    this.__recentFilterCustomBtn.onClick(() => {
+      this.__recentOnlyCustom = true;
+      this.__syncRecentFilterButtons();
+      this.__renderRecent();
+    });
+    filterSeg.add(this.__recentFilterAllBtn);
+    filterSeg.add(this.__recentFilterCustomBtn);
+    filterSeg.add(new qx.ui.core.Spacer(), { flex: 1 });
+
     this.__recentBody = new qx.ui.container.Composite(
       new qx.ui.layout.VBox(8).set({ alignX: "stretch" }),
     );
     recentInner.add(recentHeader);
+    recentInner.add(this.__recentFilterInput);
+    recentInner.add(filterSeg);
     recentInner.add(this.__recentBody);
     recentCard.setContent(recentInner);
 
@@ -419,7 +482,77 @@ class ShortenerPage extends qx.ui.container.Composite {
     this.__qrPopup.add(this.__qrPopupImg);
     this.__qrPopup.add(qrPopupClose);
 
+    this.__syncRecentFilterButtons();
+    this.__recentRelIntervalId = window.setInterval(() => {
+      if (LinkStore.listAllSorted().length === 0) return;
+      this.__renderRecent();
+    }, 60000);
+
     this.__renderRecent();
+  }
+
+  private __updateFormValidation(): void {
+    const rawLong = this.__longUrl.getValue();
+    const trimmedLong = rawLong.trim();
+    let longOk = false;
+    if (!trimmedLong) {
+      this.__longUrl.setValidationState("default");
+      this.__longUrl.setHelperText("Paste an http(s) URL.");
+    } else if (normalizeTargetUrl(rawLong)) {
+      longOk = true;
+      this.__longUrl.setValidationState("success");
+      this.__longUrl.setHelperText("Looks good.");
+    } else {
+      this.__longUrl.setValidationState("error");
+      this.__longUrl.setHelperText("Enter a valid http(s) URL.");
+    }
+
+    const customRaw = this.__customSlug.getValue();
+    let customOk = true;
+    if (!customRaw.trim()) {
+      this.__customSlug.setValidationState("default");
+      this.__customSlug.setHelperText("Leave blank for a random code.");
+    } else {
+      const c = sanitizeCustomSlug(customRaw);
+      if (!c) {
+        customOk = false;
+        this.__customSlug.setValidationState("error");
+        this.__customSlug.setHelperText(
+          "Letters, numbers, dashes only (max 64). Reserved codes not allowed.",
+        );
+      } else {
+        this.__customSlug.setValidationState("success");
+        this.__customSlug.setHelperText("Custom code looks valid.");
+      }
+    }
+
+    this.__shortenBtn.setEnabled(longOk && customOk);
+  }
+
+  private __syncRecentFilterButtons(): void {
+    if (this.__recentOnlyCustom) {
+      this.__recentFilterAllBtn.setVariant("ghost");
+      this.__recentFilterCustomBtn.setVariant("outline");
+    } else {
+      this.__recentFilterAllBtn.setVariant("outline");
+      this.__recentFilterCustomBtn.setVariant("ghost");
+    }
+  }
+
+  private __getFilteredRecentRows(): { slug: string; entry: LinkEntry }[] {
+    let rows = LinkStore.listAllSorted();
+    if (this.__recentOnlyCustom) {
+      rows = rows.filter(({ entry }) => entry.customSlug === true);
+    }
+    const q = this.__recentFilterQuery.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(({ slug, entry }) => {
+        const shortUrl = entry.shortUrl ?? buildLocalGoShortUrl(slug);
+        const hay = `${slug}\n${entry.targetUrl}\n${shortUrl}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return rows.slice(0, RECENT_LIMIT);
   }
 
   private __mainQrPlaceholderHtml(): string {
@@ -501,23 +634,27 @@ class ShortenerPage extends qx.ui.container.Composite {
 
   private __historyQrHtml(shortUrl: string): qx.ui.embed.Html {
     const host = new qx.ui.embed.Html(
-      `<div class="rounded-md border bg-white" style="width:100%;height:100%"></div>`,
+      `<div class="rounded-md border bg-white" style="width:72px;height:72px"></div>`,
     );
     host.setMinWidth(72);
     host.setWidth(72);
+    host.setMaxWidth(72);
     host.setMinHeight(72);
     host.setHeight(72);
+    host.setMaxHeight(72);
     host.setAllowShrinkX(false);
     host.setAllowShrinkY(false);
+    host.setAllowGrowX(false);
+    host.setAllowGrowY(false);
     generateQrDataUrl(shortUrl, 68).then(
       (dataUrl) => {
         host.setHtml(
-          `<div class="rounded-md border bg-white p-0.5" style="width:100%;height:100%"><img src="${dataUrl}" width="68" height="68" alt="QR code for history link" /></div>`,
+          `<div class="rounded-md border bg-white p-0.5 flex items-center justify-center" style="width:72px;height:72px"><img src="${dataUrl}" width="68" height="68" alt="QR code for history link" /></div>`,
         );
       },
       () => {
         host.setHtml(
-          `<div class="rounded-md border bg-white flex items-center justify-center" style="width:100%;height:100%"><span class="text-[10px]" style="color:var(--color-muted-foreground)">QR</span></div>`,
+          `<div class="rounded-md border bg-white flex items-center justify-center" style="width:72px;height:72px"><span class="text-[10px]" style="color:var(--color-muted-foreground)">QR</span></div>`,
         );
       },
     );
@@ -543,22 +680,20 @@ class ShortenerPage extends qx.ui.container.Composite {
   }
 
   private __shorten(): void {
-    this.__shortenBtn.setEnabled(false);
     const api = getShortenerApiBase();
     if (api) {
+      this.__shortenBtn.setEnabled(false);
       this.__shortenWithApi(api).then(
-        () => undefined,
-        () => undefined,
-      ).then(() => {
-        this.__shortenBtn.setEnabled(true);
-      });
+        () => this.__updateFormValidation(),
+        () => this.__updateFormValidation(),
+      );
       return;
     }
     try {
       this.__shortenLocal();
       this.__renderRecent();
     } finally {
-      this.__shortenBtn.setEnabled(true);
+      this.__updateFormValidation();
     }
   }
 
@@ -596,7 +731,9 @@ class ShortenerPage extends qx.ui.container.Composite {
       slug = candidate;
     }
 
-    LinkStore.put(slug, target);
+    LinkStore.put(slug, target, {
+      customSlug: customRaw.trim() ? true : undefined,
+    });
     const shortUrl = buildLocalGoShortUrl(slug);
     this.__lastShortUrl = shortUrl;
     this.__shortUrlLabel.setValue(shortUrl);
@@ -631,7 +768,10 @@ class ShortenerPage extends qx.ui.container.Composite {
       })
       .then((data) => {
         const shortUrl = `${api}/${encodeURIComponent(data.slug)}`;
-        LinkStore.put(data.slug, target, shortUrl);
+        LinkStore.put(data.slug, target, {
+          shortUrl,
+          customSlug: slugOpt ? true : undefined,
+        });
         this.__lastShortUrl = shortUrl;
         this.__shortUrlLabel.setValue(shortUrl);
         this.__refreshMainQr(shortUrl);
@@ -682,9 +822,16 @@ class ShortenerPage extends qx.ui.container.Composite {
 
   private __renderRecent(): void {
     this.__recentBody.removeAll();
-    const rows = LinkStore.listRecent(RECENT_LIMIT);
-    if (rows.length === 0) {
+    const total = LinkStore.listAllSorted().length;
+    const rows = this.__getFilteredRecentRows();
+    if (total === 0) {
       const empty = new qx.ui.basic.Label("No saved links yet.");
+      empty.setTextColor(AppColors.mutedForeground());
+      this.__recentBody.add(empty);
+      return;
+    }
+    if (rows.length === 0) {
+      const empty = new qx.ui.basic.Label("No matching links.");
       empty.setTextColor(AppColors.mutedForeground());
       this.__recentBody.add(empty);
       return;
@@ -702,22 +849,50 @@ class ShortenerPage extends qx.ui.container.Composite {
           colorBottom: AppColors.border(),
         }),
       );
-      const line1 = new qx.ui.basic.Label(
-        `${slug} → ${truncateMiddle(entry.targetUrl, 56)}`,
+
+      const rowOuter = new qx.ui.container.Composite(
+        new qx.ui.layout.HBox(10).set({ alignY: "top" }),
       );
-      line1.setWrap(true);
-      line1.setTextColor(AppColors.foreground());
-      const headRow = new qx.ui.container.Composite(
-        new qx.ui.layout.HBox(8).set({ alignY: "middle" }),
+      rowOuter.setAllowGrowX(true);
+
+      const leftCol = new qx.ui.container.Composite(
+        new qx.ui.layout.VBox(4).set({ alignX: "stretch" }),
       );
-      headRow.setAllowGrowX(true);
-      headRow.add(line1, { flex: 1 });
-      headRow.add(this.__historyQrHtml(shortUrl));
+      leftCol.setAllowGrowX(true);
+
+      const slugLbl = new qx.ui.basic.Label(slug);
+      slugLbl.setTextColor(AppColors.foreground());
+      slugLbl.setFont(
+        // @ts-ignore qooxdoo Font
+        new qx.bom.Font(14).set({ bold: true }),
+      );
+
+      const targetLbl = new qx.ui.basic.Label(truncateMiddle(entry.targetUrl, 72));
+      targetLbl.setWrap(true);
+      targetLbl.setTextColor(AppColors.mutedForeground());
+
+      const whenLbl = new qx.ui.basic.Label(formatRelativeTime(entry.createdAt));
+      whenLbl.setTextColor(AppColors.mutedForeground());
+      whenLbl.setFont(
+        // @ts-ignore
+        new qx.bom.Font(11),
+      );
+
+      leftCol.add(slugLbl);
+      leftCol.add(targetLbl);
+      leftCol.add(whenLbl);
+
+      const rightCol = new qx.ui.container.Composite(
+        new qx.ui.layout.VBox(6).set({ alignX: "center" }),
+      );
+
       const btnRow = new qx.ui.container.Composite(
         new qx.ui.layout.HBox(6).set({ alignY: "middle" }),
       );
       const copyShort = new BsButton("Copy", undefined, { variant: "outline", size: "sm" });
       copyShort.onClick(() => this.__copyUrlText(shortUrl));
+      const qrBtn = new BsButton("QR", undefined, { variant: "outline", size: "sm" });
+      qrBtn.onClick(() => this.__showRecentQrPopup(shortUrl));
       const delBtn = new BsButton("Delete", undefined, { variant: "destructive", size: "sm" });
       delBtn.onClick(() => {
         LinkStore.remove(slug);
@@ -729,14 +904,17 @@ class ShortenerPage extends qx.ui.container.Composite {
         this.__renderRecent();
         BsToast.info("Removed", slug);
       });
-      const qrBtn = new BsButton("QR", undefined, { variant: "outline", size: "sm" });
-      qrBtn.onClick(() => this.__showRecentQrPopup(shortUrl));
       btnRow.add(copyShort);
       btnRow.add(qrBtn);
       btnRow.add(delBtn);
-      btnRow.add(new qx.ui.core.Spacer(), { flex: 1 });
-      row.add(headRow);
-      row.add(btnRow);
+
+      rightCol.add(this.__historyQrHtml(shortUrl));
+      rightCol.add(btnRow);
+
+      rowOuter.add(leftCol, { flex: 1 });
+      rowOuter.add(rightCol);
+
+      row.add(rowOuter);
       this.__recentBody.add(row);
     }
   }

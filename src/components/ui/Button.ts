@@ -168,6 +168,12 @@ class BsButton extends qx.ui.basic.Atom {
     return this.__variant;
   }
 
+  public setVariant(variant: BsButtonVariant): this {
+    this.__variant = variant;
+    this.__renderButton();
+    return this;
+  }
+
   public getSize(): BsButtonSize {
     return this.__size;
   }

@@ -13,6 +13,15 @@ interface BsButton {
     | "secondary"
     | "ghost"
     | "link";
+  setVariant(
+    variant:
+      | "default"
+      | "destructive"
+      | "outline"
+      | "secondary"
+      | "ghost"
+      | "link",
+  ): this;
   getSize(): "default" | "sm" | "lg" | "icon" | "sm-icon" | "lg-icon";
   setLabelText(text: string): this;
   onClick(handler: () => void): this;
@@ -23,6 +32,9 @@ interface BsInput {
   setValue(value: string): this;
   setPlaceholder(value: string): this;
   setLeadingHtml(html: string): this;
+  setHelperText(text: string): this;
+  setValidationState(state: "default" | "error" | "success"): this;
+  getValidationState(): "default" | "error" | "success";
   onInput(handler: (value: string) => void): this;
 }
 
